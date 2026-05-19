@@ -1,0 +1,25 @@
+[Unit]
+Description=QQ DeepSeek Bot (NoneBot2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/robot
+ExecStart=/home/ubuntu/robot/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+Environment=DEEPSEEK_API_KEY=sk-b6cff52efbcc49eaa23188c144a478fe
+Environment=DEEPSEEK__API_KEY=sk-b6cff52efbcc49eaa23188c144a478fe
+Environment=ANTHROPIC_API_KEY=sk-ant-your-key-here
+Environment=FISH_AUDIO_KEY=7461ebfd492e4d81bce0b6f24a156b93
+Environment=FISH_AUDIO_VOICE_ID=12bc421f1dfd424f9616da7545fd0aeb
+Environment=FISH_AUDIO_PROXY=http://127.0.0.1:7897
+
+[Install]
+WantedBy=multi-user.target
