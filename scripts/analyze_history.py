@@ -116,7 +116,7 @@ def parse_sections(reply: str) -> dict[str, str]:
 
 
 def write_if_changed(path: Path, new_content: str, section_name: str):
-    """如果内容有变化才写入文件。"""
+    """如果内容有变化才写入文件（覆盖模式，用于 profile）。"""
     old_content = ""
     if path.exists():
         old_content = path.read_text(encoding="utf-8").strip()
@@ -131,12 +131,11 @@ def write_if_changed(path: Path, new_content: str, section_name: str):
         for line in old_content.split("\n"):
             if line.startswith("<!--") or line.startswith("# ") or line.startswith("暂无"):
                 if line.startswith("暂无"):
-                    continue  # 替换占位文本
+                    continue
                 header_lines.append(line)
             else:
                 break
 
-    output = "\n".join(header_lines) + "\n\n" + new_content.strip()
     if header_lines:
         output = "\n".join(header_lines) + "\n\n" + new_content.strip()
     else:
@@ -144,6 +143,26 @@ def write_if_changed(path: Path, new_content: str, section_name: str):
 
     path.write_text(output + "\n", encoding="utf-8")
     print(f"[{section_name}] 已更新: {path}")
+    return True
+
+
+def write_append(path: Path, new_content: str, section_name: str):
+    """追加新内容到文件（追加模式，用于 memory）。"""
+    if new_content.strip() == "（无新增）":
+        print(f"[{section_name}] 无新发现，跳过追加")
+        return False
+
+    old_content = ""
+    if path.exists():
+        old_content = path.read_text(encoding="utf-8").strip()
+
+    if new_content.strip() in old_content:
+        print(f"[{section_name}] 内容已存在，跳过追加")
+        return False
+
+    output = old_content + "\n" + new_content.strip() if old_content else new_content.strip()
+    path.write_text(output + "\n", encoding="utf-8")
+    print(f"[{section_name}] 已追加: {path}")
     return True
 
 
@@ -158,9 +177,13 @@ def main():
 
     print(f"读取聊天记录 {history.count(chr(10))} 行")
 
-    # 2. 组装 prompt
+    # 2. 组装 prompt（注入旧记忆和画像作为上下文）
+    old_memory = MEMORY_PATH.read_text(encoding="utf-8").strip() if MEMORY_PATH.exists() else "（暂无）"
+    old_profile = PROFILE_PATH.read_text(encoding="utf-8").strip() if PROFILE_PATH.exists() else "（暂无）"
     prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
     prompt = prompt_template.replace("{chat_history}", history)
+    prompt = prompt.replace("{old_memory}", old_memory)
+    prompt = prompt.replace("{old_profile}", old_profile)
     print(f"Prompt 长度: {len(prompt)} 字符")
 
     # 3. 调用 LLM
@@ -186,8 +209,7 @@ def main():
 
     # 5. 写入
     memory_text = sections["memory"]
-    if memory_text != "（无新增）":
-        write_if_changed(MEMORY_PATH, memory_text, "memory")
+    write_append(MEMORY_PATH, memory_text, "memory")
 
     profile_text = sections["profile"]
     if profile_text != "（无新增）":

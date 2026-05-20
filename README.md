@@ -116,8 +116,8 @@ python bot.py
 | 文件 | 内容 | 编辑方式 |
 |------|------|----------|
 | `system.md` | 基础人格、语言风格、行为约束 | 手动编辑 |
-| `memory.md` | 从对话中学到的经验 | 分析脚本自动更新 |
-| `profile.md` | 用户画像 | 分析脚本自动更新 |
+| `memory.md` | 学到的经验 | 分析脚本自动 **追加** |
+| `profile.md` | 用户画像 | 分析脚本自动 **覆写+合并** |
 
 ### 加载机制
 
@@ -134,10 +134,10 @@ python bot.py
 
 每日凌晨 2:07 通过 cron 触发分析脚本：
 
-1. 从 SQLite 读取最近 24 小时聊天记录
-2. 调用 DeepSeek 分析对话内容（按 `analysis_prompt.md` 模板）
+1. 从 SQLite 读取最近 24 小时聊天记录，同时注入旧的 memory.md 和 profile.md 作为上下文
+2. 调用 DeepSeek 分析（按 `analysis_prompt.md` 模板），LLM 基于旧内容做增删改
 3. LLM 按 `%%% SECTION %%%` 分隔输出三段：memory / profile / suggestions
-4. 仅当内容有变化时才写入文件（保留文件头注释）
+4. memory.md **追加**写入 — 仅新增行，旧内容物理保留；profile.md **覆写合并** — LLM 输出完整新版
 5. 人设系统通过 mtime 感知自动热加载新记忆
 
 设置 cron：

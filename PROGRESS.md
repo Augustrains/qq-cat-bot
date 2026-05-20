@@ -108,8 +108,8 @@ cron(2:07 AM) → analyze_history.py → SQLite(24h 消息) → DeepSeek 分析 
 - chat_history.py + analyze_history.py 添加 `busy_timeout=5000`
 - .gitignore 添加 `clash/config.yaml`, `*.db`, `logs/`, `!.env.example`
 - clash/config.yaml 从 git 历史中 filter-branch 清除
-- 创建 .env.example 配置模板
-- 创建 README.md
+- 创建 .env.example 配置模板 + README.md
+- 分析管道优化：注入旧 memory/profile 到分析 prompt，memory 改为追加模式，profile 改为基于旧版覆写合并
 
 ## 命令速查
 
