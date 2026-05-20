@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import httpx
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -7,6 +8,8 @@ from nonebot import on_message
 from nonebot.rule import Rule
 from nonebot.log import logger
 from nonebot.adapters.qq import Bot, C2CMessageCreateEvent, GroupAtMessageCreateEvent, MessageSegment
+
+from .chat_history import init_db, save_message
 
 # ============================================================
 # 配置
@@ -17,28 +20,78 @@ DEEPSEEK_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 
-FAST_MODEL = "deepseek-chat"
-PRO_MODEL = "deepseek-v4-pro"
+FAST_MODEL = os.getenv("DEEPSEEK_FAST_MODEL", "deepseek-chat")
+PRO_MODEL = os.getenv("DEEPSEEK_PRO_MODEL", "deepseek-v4-pro")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-SWITCH_ROUNDS = 10
+SWITCH_ROUNDS = int(os.getenv("SWITCH_ROUNDS", "10"))
 MAX_HISTORY = int(os.getenv("DEEPSEEK_MAX_HISTORY", "20"))
 
-FISH_AUDIO_KEY = os.getenv("FISH_AUDIO_KEY", "")
-FISH_AUDIO_VOICE_ID = os.getenv("FISH_AUDIO_VOICE_ID", "450c6bf0e6ac41c892edf698c7f69630")  # 苍白高
-FISH_AUDIO_PROXY = os.getenv("FISH_AUDIO_PROXY", "")  # 如 http://127.0.0.1:7897
+DASHSCOPE_KEY = os.getenv("DASHSCOPE_API_KEY", "")
+QWEN_TTS_URL = os.getenv("QWEN_TTS_URL", "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")
+QWEN_TTS_VOICE = os.getenv("QWEN_TTS_VOICE", "Cherry")  # 芊悦 — 阳光积极、亲切自然
+QWEN_TTS_MODEL = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-flash")
 
-FALLBACK_PROMPT = "你是一个友善、有用的QQ机器人助手。用简洁自然的中文回复。"
-CHARACTER_FILE = os.getenv("CHARACTER_FILE", "characters/default.md")
+FALLBACK_PROMPT = os.getenv("FALLBACK_PROMPT", "你是一个友善、有用的QQ机器人助手。用简洁自然的中文回复。")
+CHARACTER_DIR = os.path.join(os.path.dirname(__file__), "..", "characters", "default")
+LEGACY_CHARACTER_FILE = os.getenv("CHARACTER_FILE", "")
+
+# 冻结快照 + mtime 感知自动刷新
+_character_prompt: str = ""
+_character_mtimes: dict[str, float] = {}
 
 
 def _load_character() -> str:
-    try:
-        path = os.path.join(os.path.dirname(__file__), "..", CHARACTER_FILE)
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        logger.warning(f"Character file not found: {CHARACTER_FILE}")
+    """读取人设文件。仅在 mtime 变化或首次加载时才重新读盘。"""
+    global _character_prompt, _character_mtimes
+
+    sources: list[tuple[str, str]] = []
+
+    system_file = os.path.join(CHARACTER_DIR, "system.md")
+    if os.path.isfile(system_file):
+        for fname in ("system.md", "memory.md", "profile.md"):
+            fpath = os.path.join(CHARACTER_DIR, fname)
+            if os.path.isfile(fpath):
+                sources.append((fname, fpath))
+    elif LEGACY_CHARACTER_FILE:
+        path = os.path.join(os.path.dirname(__file__), "..", LEGACY_CHARACTER_FILE)
+        if os.path.isfile(path):
+            sources.append(("legacy", path))
+
+    if not sources:
+        logger.warning("Character prompt not found, using fallback")
         return FALLBACK_PROMPT
+
+    # 检查 mtime 是否需要刷新
+    needs_reload = not _character_prompt
+    for _, fpath in sources:
+        try:
+            mtime = os.path.getmtime(fpath)
+        except OSError:
+            continue
+        if _character_mtimes.get(fpath, 0) != mtime:
+            needs_reload = True
+            _character_mtimes[fpath] = mtime
+
+    if not needs_reload:
+        return _character_prompt
+
+    parts = []
+    for _, fpath in sources:
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    parts.append(content)
+        except FileNotFoundError:
+            pass
+
+    if parts:
+        _character_prompt = "\n\n".join(parts)
+        logger.info("[auto_chat] character prompt reloaded (mtime changed)")
+    else:
+        _character_prompt = FALLBACK_PROMPT
+
+    return _character_prompt
 
 
 # ============================================================
@@ -159,35 +212,47 @@ class VoiceOutput(OutputHandler):
         pass
 
     async def send_final(self, bot, event, full_text: str):
-        if not FISH_AUDIO_KEY:
-            await bot.send(event, "语音功能还没配置好喵...主人需要先设置 FISH_AUDIO_KEY 喵")
+        if not DASHSCOPE_KEY:
+            await bot.send(event, "语音功能还没配置好喵...主人需要先设置 DASHSCOPE_API_KEY 喵")
             return
         try:
-            client_kwargs = {"timeout": 60}
-            if FISH_AUDIO_PROXY:
-                client_kwargs["proxy"] = FISH_AUDIO_PROXY
-            async with httpx.AsyncClient(**client_kwargs) as client:
-                resp = await client.post(
-                    "https://api.fish.audio/v1/tts",
+            if len(full_text) > 600:
+                full_text = full_text[:600]
+                logger.warning("[auto_chat] TTS text truncated to 600 chars")
+            async with httpx.AsyncClient(timeout=60) as client:
+                tts_resp = await client.post(
+                    QWEN_TTS_URL,
                     json={
-                        "text": full_text,
-                        "format": "mp3",
-                        "reference_id": FISH_AUDIO_VOICE_ID,
-                        "latency": "balanced",
+                        "model": QWEN_TTS_MODEL,
+                        "input": {
+                            "text": full_text,
+                            "voice": QWEN_TTS_VOICE,
+                            "language_type": "Chinese",
+                        },
                     },
                     headers={
-                        "Authorization": f"Bearer {FISH_AUDIO_KEY}",
+                        "Authorization": f"Bearer {DASHSCOPE_KEY}",
                         "Content-Type": "application/json",
-                        "model": "s2-pro",
                     },
                 )
-                if resp.status_code == 200:
-                    await bot.send(event, MessageSegment.file_audio(resp.content, "reply.mp3"))
+                if tts_resp.status_code != 200:
+                    logger.error(f"[auto_chat] Qwen TTS error: {tts_resp.text}")
+                    await bot.send(event, full_text)
+                    return
+                tts_data = tts_resp.json()
+                audio_url = tts_data.get("output", {}).get("audio", {}).get("url")
+                if not audio_url:
+                    logger.error(f"[auto_chat] Qwen TTS: no audio URL in response: {tts_data}")
+                    await bot.send(event, full_text)
+                    return
+                audio_resp = await client.get(audio_url)
+                if audio_resp.status_code == 200:
+                    await bot.send(event, MessageSegment.file_audio(audio_resp.content, "reply.wav"))
                 else:
-                    logger.error(f"[auto_chat] Fish Audio error: {resp.text}")
+                    logger.error(f"[auto_chat] Qwen TTS audio download error: {audio_resp.status_code}")
                     await bot.send(event, full_text)
         except Exception as e:
-            logger.error(f"[auto_chat] Fish Audio TTS error: {e}")
+            logger.error(f"[auto_chat] Qwen TTS error: {e}")
             await bot.send(event, full_text)
 
 
@@ -221,7 +286,7 @@ def _build_menu() -> tuple[str, list[dict]]:
     lines.append("── 输出 ──")
     for mode, label in [("text", "文字输出"), ("voice", "语音输出")]:
         counter += 1
-        if mode == "voice" and not FISH_AUDIO_KEY:
+        if mode == "voice" and not DASHSCOPE_KEY:
             lines.append(f"  {counter}. {label} (未配置 Key，不可用)")
         else:
             lines.append(f"  {counter}. {label}")
@@ -259,6 +324,8 @@ def _get_user_id(event) -> str:
 async def _is_qq_chat(event) -> bool:
     return isinstance(event, (C2CMessageCreateEvent, GroupAtMessageCreateEvent))
 
+
+init_db()
 
 auto_chat = on_message(rule=Rule(_is_qq_chat), priority=99, block=False)
 
@@ -310,6 +377,13 @@ async def handle_auto_chat(bot: Bot, event):
         session.update(_new_session())
         logger.info(f"[auto_chat] Cleared all sessions for {user_id}")
         await bot.send(event, "对话记忆已清除喵")
+        return
+    elif raw in ("/reload", "重载人设"):
+        global _character_mtimes
+        _character_mtimes.clear()
+        prompt = _load_character()
+        logger.info(f"[auto_chat] character reloaded manually, len={len(prompt)}")
+        await bot.send(event, "人设和记忆已重新加载喵~")
         return
     elif raw in ("/status", "当前后端", "当前状态"):
         await _show_status(bot, event, session)
@@ -398,6 +472,10 @@ async def _call_llm(bot, event, user_id, session, text):
         hist["messages"].append({"role": "user", "content": text})
         hist["messages"].append({"role": "assistant", "content": reply})
         hist["rounds"] += 1
+
+        # 异步写 DB，不阻塞响应
+        asyncio.create_task(save_message(user_id, "user", text, backend_name, model))
+        asyncio.create_task(save_message(user_id, "assistant", reply, backend_name, model))
 
         if len(hist["messages"]) > MAX_HISTORY:
             hist["messages"] = hist["messages"][-MAX_HISTORY:]

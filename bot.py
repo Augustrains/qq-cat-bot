@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv("/home/ubuntu/robot/.env")
+
 import nonebot
 from nonebot.adapters.qq import Adapter as QQAdapter
 
