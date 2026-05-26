@@ -17,6 +17,7 @@ build/
 .idea/
 *.swp
 *.swo
+.claude/
 
 # ===== 代理配置（含节点密钥）=====
 clash/config.yaml
@@ -28,6 +29,10 @@ logs/
 *.mp3
 *.wav
 *.log
+
+# ===== FAISS 索引（运行时生成）=====
+tools.index
+tools_ids.npy
 
 # ===== 系统文件 =====
 .DS_Store

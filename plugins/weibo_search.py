@@ -100,7 +100,58 @@ def _select(posts: list[dict], n: int = MAX_RESULTS) -> list[dict]:
 
 
 # ============================================================
-# 规则 + 处理器
+# 核心搜索函数 — 可被 NoneBot handler 和 LangGraph tool 复用
+# ============================================================
+
+async def search_weibo(keyword: str) -> str:
+    """搜索微博，返回格式化的 Top 5 结果文本。"""
+    logger.info(f"[weibo_search] searching: {keyword}")
+
+    async with httpx.AsyncClient(
+        timeout=15,
+        headers={"User-Agent": UA, "X-Requested-With": "XMLHttpRequest"},
+        follow_redirects=False,
+    ) as client:
+        cookies = await _ensure_cookies(client)
+        if not cookies:
+            return "微博搜索暂时不可用喵...等会儿再试试喵"
+
+        resp = await client.get(
+            "https://m.weibo.cn/api/container/getIndex",
+            params={"containerid": f"100103type=1&q={keyword}", "page": 1},
+            cookies=cookies,
+        )
+
+        if resp.status_code != 200:
+            logger.error(f"[weibo_search] API {resp.status_code}")
+            return "微博搜不到喵...可能被限速了，过会儿再试喵"
+
+        data = resp.json()
+        if data.get("ok") != 1:
+            logger.error(f"[weibo_search] API error: {data}")
+            return "微博搜索出错了喵..."
+
+        posts = _parse_results(data)
+        if not posts:
+            return f"没搜到「{keyword}」相关的内容喵...换几个关键词试试喵？"
+
+        selected = _select(posts)
+
+    lines = [f"搜「{keyword}」找到 {len(posts)} 条，推荐 {len(selected)} 条喵：", ""]
+    for i, p in enumerate(selected, 1):
+        text = p["text"][:120]
+        if len(p["text"]) > 120:
+            text += "..."
+        lines.append(f"{i}. {text}")
+        lines.append(f"   @{p['user']} | 转{p['reposts']} 评{p['comments']} 赞{p['likes']}")
+        lines.append(f"   {p['url']}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# 规则 + 处理器（thin wrapper，保留向后兼容）
 # ============================================================
 
 PREFIXES = ("/weibo ", "/wb ", "搜微博 ", "搜索微博 ")
@@ -128,60 +179,12 @@ async def handle_weibo_search(bot: Bot, event):
         await bot.send(event, "搜什么喵？用法: /weibo <关键词>")
         return
 
-    logger.info(f"[weibo_search] searching: {keyword}")
-
     try:
-        async with httpx.AsyncClient(
-            timeout=15,
-            headers={"User-Agent": UA, "X-Requested-With": "XMLHttpRequest"},
-            follow_redirects=False,
-        ) as client:
-            cookies = await _ensure_cookies(client)
-            if not cookies:
-                await bot.send(event, "微博搜索暂时不可用喵...等会儿再试试喵")
-                return
-
-            resp = await client.get(
-                "https://m.weibo.cn/api/container/getIndex",
-                params={"containerid": f"100103type=1&q={keyword}", "page": 1},
-                cookies=cookies,
-            )
-
-            if resp.status_code != 200:
-                logger.error(f"[weibo_search] API {resp.status_code}")
-                await bot.send(event, "微博搜不到喵...可能被限速了，过会儿再试喵")
-                return
-
-            data = resp.json()
-            if data.get("ok") != 1:
-                logger.error(f"[weibo_search] API error: {data}")
-                await bot.send(event, "微博搜索出错了喵...")
-                return
-
-            posts = _parse_results(data)
-            if not posts:
-                await bot.send(event, f"没搜到「{keyword}」相关的内容喵...换几个关键词试试喵？")
-                return
-
-            selected = _select(posts)
-
+        result = await search_weibo(keyword)
+        await bot.send(event, result)
     except httpx.TimeoutException:
         logger.error("[weibo_search] timeout")
         await bot.send(event, "搜索超时了喵...微博那边好慢，过会儿再试喵")
-        return
     except Exception as e:
         logger.error(f"[weibo_search] error: {e}")
         await bot.send(event, "搜索出错了喵...")
-        return
-
-    lines = [f"搜「{keyword}」找到 {len(posts)} 条，推荐 {len(selected)} 条喵：", ""]
-    for i, p in enumerate(selected, 1):
-        text = p["text"][:120]
-        if len(p["text"]) > 120:
-            text += "..."
-        lines.append(f"{i}. {text}")
-        lines.append(f"   @{p['user']} | 转{p['reposts']} 评{p['comments']} 赞{p['likes']}")
-        lines.append(f"   {p['url']}")
-        lines.append("")
-
-    await bot.send(event, "\n".join(lines))
